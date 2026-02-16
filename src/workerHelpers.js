@@ -28,22 +28,43 @@ function waitForMsgType(target, type) {
   });
 }
 
-// # Note
-// Our JS should have been generated in
-// `[out-dir]/snippets/wasm-bindgen-rayon-[hash]/workerHelpers.js`,
-// resolve the main module via `../../..`.
+// Dynamically resolve the main JS module that exports `initSync` and
+// `wbg_rayon_start_worker`.
 //
-// This might need updating if the generated structure changes on wasm-bindgen
-// side ever in the future, but works well with bundlers today. The whole
-// point of this crate, after all, is to abstract away unstable features
-// and temporary bugs so that you don't need to deal with them in your code.
-import { initSync, wbg_rayon_start_worker } from '../../..';
+// With bundlers (Trunk, webpack, vite), `import('../../..')` resolves
+// correctly because the bundler rewrites the path — the generated snippet
+// lives at `[out-dir]/snippets/wasm-bindgen-rayon-[hash]/src/workerHelpers.js`.
+//
+// With bare HTTP servers (e.g. wasm-server-runner), the root URL serves HTML
+// instead of a JS module, causing the import to fail. In that case we fall
+// back to fetching the HTML page and discovering the main JS entry point
+// from its <script> tag.
+async function resolveMainModule() {
+  try {
+    return await import('../../..');
+  } catch (e) {
+    const rootUrl = new URL('../../..', import.meta.url).href;
+    const resp = await fetch(rootUrl);
+    const html = await resp.text();
+    const scriptTag = html.match(/<script\s+src=['"]([^'"]+)['"]\s+type\s*=\s*['"]?module/i);
+    if (scriptTag) {
+      const runJs = await fetch(new URL(scriptTag[1], rootUrl).href);
+      const runText = await runJs.text();
+      const fromMatch = runText.match(/from\s+['"]\.\/([^'"]+)['"]/);
+      if (fromMatch) {
+        return import(new URL(fromMatch[1], rootUrl).href);
+      }
+    }
+    throw e;
+  }
+}
 
 if (name === "wasm_bindgen_worker") {
   waitForMsgType(self, 'wasm_bindgen_worker_init').then(async data => {
-    initSync(data.init);
+    const pkg = await resolveMainModule();
+    pkg.initSync(data.init);
     postMessage({ type: 'wasm_bindgen_worker_ready' });
-    wbg_rayon_start_worker(data.receiver);
+    pkg.wbg_rayon_start_worker(data.receiver);
   });
 }
 
